@@ -11,6 +11,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, accuracy_score
 import joblib
+from fuzzywuzzy import fuzz
 
 # ---------------- NLP SETUP ----------------
 nltk.download('punkt')
@@ -30,6 +31,59 @@ stop_words = english_stop.union(leb_stopwords)
 
 lemmatizer = WordNetLemmatizer()
 
+# ---------------- SLANG MAP ----------------
+slang_map = {
+    # Weed
+    "widad": "weed", "weedad": "weed", "widat": "weed",
+    "weed": "weed", "hash": "hash", "hashish": "hash",
+    "joint": "joint", "j": "joint",
+
+    # Pills
+    "hbboub": "pills", "7abba": "pills", "pill": "pills",
+    "pills": "pills", "capsule": "pills", "caps": "pills",
+    "dose": "pills", "xans": "pills", "xanax": "pills",
+    "valium": "pills", "vals": "pills",
+    "hboub": "pills", "habbe": "pills", "7abbe": "pills",
+
+    # Cocaine
+    "coke": "cocaine", "snow": "cocaine", "white": "cocaine",
+    "powder": "cocaine", "poudre": "cocaine",
+
+    # Weapons
+    "gun": "weapon", "sle7": "weapon", "msela7": "weapon",
+    "piece": "weapon", "knife": "weapon", "sekkin": "weapon",
+    "sekinak": "weapon","sekkinak": "weapon",
+}
+
+# -------------- FUZZY MATCH --------------
+def fuzzy_match(token: str, options: list, threshold=85):
+    for opt in options:
+        if fuzz.ratio(token, opt) >= threshold:
+            return opt
+    return None
+
+
+# ---------------- NORMALIZATION ----------------
+def normalize_variants(token):
+    # Regex normalization for weapons
+    if re.match(r"sle7\w*", token):
+        return "weapon"
+
+    # Cocaine fuzzy
+    cocaine_words = ["bayda", "abyad", "coke", "white"]
+    match = fuzzy_match(token, cocaine_words)
+    if match and match not in ["bayda", "abyad"]:
+        return "cocaine"
+
+    # Pills fuzzy
+    pills_words = ["pill", "pills", "xans", "xanax", "valium"]
+    match = fuzzy_match(token, pills_words)
+    if match:
+        return "pills"
+
+    return slang_map.get(token, token)
+
+
 def get_wordnet_pos(tag):
     if tag.startswith('J'): return wordnet.ADJ
     elif tag.startswith('V'): return wordnet.VERB
@@ -37,32 +91,6 @@ def get_wordnet_pos(tag):
     elif tag.startswith('R'): return wordnet.ADV
     return wordnet.NOUN
 
-# ---------------- SLANG NORMALIZATION ----------------
-
-slang_map = {
-    "widad": "weed", "weedad": "weed", "widat": "weed",
-    "weed": "weed", "hash": "hash", "hashish": "hash",
-    "joint": "joint", "j": "joint",
-
-    "hbboub": "pills", "7abba": "pills", "pill": "pills",
-    "pills": "pills", "capsule": "pills", "caps": "pills",
-    "dose": "pills", "xans": "pills", "xanax": "pills",
-    "valium": "pills", "vals": "pills",
-    "hboub": "pills", "habbe": "pills", "7abbe": "pills",
-
-    "coke": "cocaine", "snow": "cocaine", "white": "cocaine",
-     "el bayda": "cocaine",
-
-    "gun": "weapon", "sle7": "weapon", "msela7": "weapon",
-    "piece": "weapon", "knife": "weapon", "sekkin": "weapon",
-    "sekkinak": "weapon", "sekinak": "weapon",
-}
-
-def normalize_variants(token):
-    if re.match(r"sle7\w*", token): return "weapon"
-    if re.match(r"xans\w*", token): return "pills"
-    if re.match(r"abyad\w*", token): return "cocaine"
-    return slang_map.get(token, token)
 
 def clean_text(text):
     text = str(text).lower()
@@ -77,6 +105,7 @@ def clean_text(text):
 
     return " ".join(lemmatized)
 
+
 class_names = {
     0: "NORMAL",
     1: "WEED SLANG",
@@ -85,14 +114,11 @@ class_names = {
     4: "WEAPONS SLANG"
 }
 
+
 # ---------------- LOAD OR TRAIN MODEL ----------------
-
-def load_or_train_model():
-    if os.path.exists(MODEL_PATH):
-        print("[MODEL] Loading existing model...")
-        return joblib.load(MODEL_PATH)
-
+def train_model():
     print("[MODEL] Training new model...")
+
     df = pd.read_csv(DATASET_PATH)
     df["clean"] = df["text"].apply(clean_text)
 
@@ -106,13 +132,14 @@ def load_or_train_model():
 
     model = Pipeline([
         ("tfidf", TfidfVectorizer(
-            ngram_range=(1, 2),
+            analyzer="word",
+            ngram_range=(1, 3),
             sublinear_tf=True,
             min_df=1,
             max_df=0.95
         )),
         ("clf", LogisticRegression(
-            max_iter=400,
+            max_iter=800,
             solver="lbfgs",
             multi_class="multinomial"
         ))
@@ -125,23 +152,8 @@ def load_or_train_model():
     print(classification_report(y_test, y_pred))
 
     joblib.dump(model, MODEL_PATH)
-    return model
+    print("[MODEL] Saved to", MODEL_PATH)
 
 
-model = load_or_train_model()
-
-# ---------------- API FUNCTION ----------------
-
-def predict_for_api(text: str):
-    cleaned = clean_text(text)
-    probs = model.predict_proba([cleaned])[0]
-    predicted_class = int(probs.argmax())
-    confidence = float(probs[predicted_class])
-
-    return {
-        "original": text,
-        "cleaned": cleaned,
-        "label": class_names[predicted_class],
-        "class_id": predicted_class,
-        "confidence": confidence
-    }
+if __name__ == "__main__":
+    train_model()
