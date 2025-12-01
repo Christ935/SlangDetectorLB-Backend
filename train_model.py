@@ -13,7 +13,7 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 from fuzzywuzzy import fuzz
 
-# ---------------- NLP SETUP ----------------
+
 nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('averaged_perceptron_tagger')
@@ -31,7 +31,7 @@ stop_words = english_stop.union(leb_stopwords)
 
 lemmatizer = WordNetLemmatizer()
 
-# ---------------- SLANG MAP ----------------
+
 slang_map = {
     # Weed
     "widad": "weed", "weedad": "weed", "widat": "weed",
@@ -55,7 +55,7 @@ slang_map = {
     "sekinak": "weapon","sekkinak": "weapon",
 }
 
-# -------------- FUZZY MATCH --------------
+
 def fuzzy_match(token: str, options: list, threshold=85):
     for opt in options:
         if fuzz.ratio(token, opt) >= threshold:
@@ -63,19 +63,19 @@ def fuzzy_match(token: str, options: list, threshold=85):
     return None
 
 
-# ---------------- NORMALIZATION ----------------
+
 def normalize_variants(token):
-    # Regex normalization for weapons
+    
     if re.match(r"sle7\w*", token):
         return "weapon"
 
-    # Cocaine fuzzy
+    
     cocaine_words = ["bayda", "abyad", "coke", "white"]
     match = fuzzy_match(token, cocaine_words)
     if match and match not in ["bayda", "abyad"]:
         return "cocaine"
 
-    # Pills fuzzy
+    
     pills_words = ["pill", "pills", "xans", "xanax", "valium"]
     match = fuzzy_match(token, pills_words)
     if match:
@@ -115,7 +115,7 @@ class_names = {
 }
 
 
-# ---------------- LOAD OR TRAIN MODEL ----------------
+
 def train_model():
     print("[MODEL] Training new model...")
 

@@ -9,10 +9,12 @@ from nltk.tokenize import word_tokenize
 from fuzzywuzzy import fuzz
 import logging
 
-# ================== FASTAPI INIT ==================
+# First we set up logging and the FastAPI app 
+
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
 
+# Set up CORS middleware for cross-origin requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,15 +23,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================== MODEL ==================
+# Load the pre-trained model
+
 MODEL_PATH = "enhanced_multiclass_model.joblib"
 model = joblib.load(MODEL_PATH)
 
-# ================== NLTK SETUP ==================
+
 nltk.download("punkt")
 nltk.download("stopwords")
 nltk.download("averaged_perceptron_tagger")
 nltk.download("wordnet")
+
+# We start by defining the stop words which include both English and Lebanese Arabic slang stop words that are common words that do not contribute much to the meaning of the text.
 
 english_stop = set(stopwords.words("english"))
 leb_stopwords = {
@@ -40,9 +45,10 @@ leb_stopwords = {
 
 stop_words = english_stop.union(leb_stopwords)
 
+# Initialize the lemmatizer to reduce words to their base or root form
 lemmatizer = WordNetLemmatizer()
 
-# ================== LABELS ==================
+# Define class names for the different categories
 class_names = {
     0: "NORMAL",
     1: "WEED SLANG",
@@ -52,52 +58,51 @@ class_names = {
 }
 
 
-# ======================================================
-# ================== PHRASE RULES ======================
-# ======================================================
+# In this function, we apply specific phrase-based rules to classify the text into different categories and help our model make more accurate predictions.
+
 def phrase_rules(text: str):
+    #We first normalize the text by converting it to lowercase and removing extra spaces
     t = text.lower().strip()
     clean_t = re.sub(r"\s+", " ", t)
     tokens = clean_t.split()
 
-    # =====================================================
-    # 0) WEAPONS — EVERYTHING IS WEAPONS EXCEPT "sekkin matbakh"
-    # =====================================================
+   # Define a list of weapon-related words to identify weapons slang
     weapon_words = [
-    # knives
+    
     "sekkin", "sekin", "sekkinak", "sekinak",
     "knife","sekkineh",
 
-    # guns
+    
     "gun", "pistol", "beretta", "glock", "rifle",
     "m16", "ak47", "ak-47", "kalash", "kalashnikov",
     "sniper", "revolver", "magnum",
 
-    # arabic firearms
+    
     "sle7ak", "sle7", "slehak", "sleh", "baroud", "baroude", "baroudi",
 
-    # explosives
+    
     "bomb", "grenade", "tnt", "c4", "explosive", "eneble"
 ]
 
-    # Safe kitchen knife phrase
+    # Check for specific phrase that should be classified as NORMAL despite containing weapon words
     if "sekkin matbakh" in clean_t or "sekin matbakh" in clean_t:
         return "NORMAL"
 
-    # If any weapon term appears → WEAPONS SLANG (no need for violence)
+    
+    # If any weapon-related word is found in the text, classify it as WEAPONS SLANG
     if any(w in clean_t for w in weapon_words):
         return "WEAPONS SLANG"
 
-    # =====================================================
-    # 1) WEED — J slang detection (STRICT & SAFE)
-    # =====================================================
-
+    
+    # Handle cases related to the slang term "j" which can refer to a joint (weed) or be used in normal contexts
     if re.match(r"^j['\s][a-z]", clean_t):
         return "NORMAL"
-
+    
+    # Handle the case where it could be a typo
     if clean_t == "j":
         return "NORMAL"
-
+    
+    # Check if the slang term "j" is used in a context related to weed
     if "j" in tokens:
         weed_ctx = ["oerout", "wra2", "wara2", "dakhin", "smoke", "baf", "baff", "joint", "weed"]
 
@@ -108,9 +113,7 @@ def phrase_rules(text: str):
             if tokens[i] == "bade" and tokens[i + 1] == "j":
                 return "WEED SLANG"
 
-    # =====================================================
-    # 2) SHORT “bade ...” → NORMAL
-    # =====================================================
+    # Specific rule for "bade" (I want) followed by non-suspicious terms
 
     if tokens and tokens[0] == "bade" and len(tokens) <= 2:
         suspicious_terms = ["j", "otaata", "abyad", "bayda",
@@ -119,9 +122,7 @@ def phrase_rules(text: str):
         if all(tok not in suspicious_terms for tok in tokens[1:]):
             return "NORMAL"
 
-    # =====================================================
-    # 3) SAFE OBJECTS WITH WHITE → NORMAL
-    # =====================================================
+    # Define a list of safe objects that, when mentioned alongside suspicious terms, indicate a NORMAL context
 
     safe_objects = [
         "jeep", "siara", "seyara", "car", "motor", "moteur",
@@ -135,37 +136,32 @@ def phrase_rules(text: str):
         if obj in clean_t and ("bayda" in clean_t or "abyad" in clean_t):
             return "NORMAL"
 
-        # =====================================================
-    # 4) COCAINE RULES (NEW FIX)
-    # =====================================================
+        
 
     text_words = clean_t.split()
 
-    # --- 4.1 HIGH PRIORITY: "el abyad" / "el bayda" ---
+    
     if "el abyad" in clean_t or "el bayda" in clean_t:
         return "COCAINE SLANG"
 
-    # --- 4.2 "abyad" ALWAYS = cocaine ---
+    
     if "abyad" in clean_t:
         return "COCAINE SLANG"
 
-    # --- 4.3 BAYDA ALONE (SAFE UNLESS DRUG CONTEXT) ---
+    
     cocaine_context = [
         "otaata", "packet", "poudra", "powder",
         "l2met", "bag", "kabsna", "kamacho"
     ]
 
     if "bayda" in clean_t:
-        # if any cocaine context appears → cocaine slang
+        
         if any(c in clean_t for c in cocaine_context):
             return "COCAINE SLANG"
-        # else → NORMAL (egg, shirt bayda, etc)
-        # will be returned by later logic
+        
         pass
 
-    # =====================================================
-    # 4.4 ARREST TERMS + white (still work)
-    # =====================================================
+   
 
     arrest_terms = [
         "kamacho", "kamachou", "kamachoune",
@@ -177,9 +173,7 @@ def phrase_rules(text: str):
     if any(a in clean_t for a in arrest_terms) and ("abyad" in clean_t or "el abyad" in clean_t):
         return "COCAINE SLANG"
 
-    # =====================================================
-    # 4.5 COCAINE packet terms with bayda
-    # =====================================================
+
 
     cocaine_packet_terms = [
         "otaata bayda", "otet bayda",
@@ -190,9 +184,7 @@ def phrase_rules(text: str):
     if any(term in clean_t for term in cocaine_packet_terms):
         return "COCAINE SLANG"
 
-    # =====================================================
-    # 4.6 DIRECT REQUEST FOR COCAINE
-    # =====================================================
+  
 
     request_verbs = [
         "bade", "baddi", "bedde",
@@ -205,21 +197,19 @@ def phrase_rules(text: str):
         if any(v in clean_t for v in request_verbs):
             return "COCAINE SLANG"
 
-    # if only "bayda" + request verb → still NORMAL unless cocaine context
+    
     if "bayda" in clean_t and any(v in clean_t for v in request_verbs):
         if any(c in clean_t for c in cocaine_context):
             return "COCAINE SLANG"
         return "NORMAL"
 
 
-    # =====================================================
-    # 8) FALLBACK: WHITE WITHOUT DRUG → NORMAL
-    # =====================================================
+   
     pills_keywords = ["xans", "xan", "xanax", "hboub", "habbe", "7abbe", "pills", "pill"]
     pills_request_verbs = [
         "jebet", "jib", "jeeb", "jible", "3andak", "ma3ak",
         "bade", "baddi", "bedde",
-        "btejeeb", "btjeeb", "dabbir", "ndabbir", "dabbirlé"
+        "btejeeb", "btjeeb", "dabbir", "ndabbir", "dabbirlé","dabberle"
     ]
 
     if any(pk in clean_t for pk in pills_keywords) and any(rv in clean_t for rv in pills_request_verbs):
@@ -232,27 +222,25 @@ def phrase_rules(text: str):
 
 
 
-# ======================================================
-# ================== SLANG NORMALIZATION ===============
-# ======================================================
+# We define a mapping of slang variants to their normalized forms to standardize different spellings and variations of slang terms.
 slang_map = {
-    # Weed
+    
     "widad": "weed", "weedad": "weed", "widat": "weed",
     "weed": "weed", "hash": "hash", "hashish": "hash",
-    "joint": "joint",
+    "joint": "joint", "7achich": "hash", "j": "joint",
 
-    # Pills
+    
     "hbboub": "pills", "7abba": "pills", "pill": "pills",
     "pills": "pills", "capsule": "pills", "caps": "pills",
     "dose": "pills", "xans": "pills", "xanax": "pills",
     "valium": "pills", "vals": "pills",
     "hboub": "pills", "habbe": "pills", "7abbe": "pills",
 
-    # Cocaine
+    
     "coke": "cocaine", "snow": "cocaine", "white": "cocaine",
     "powder": "cocaine", "poudre": "cocaine",
 
-    # Weapons
+    
     "gun": "weapon", "sle7": "weapon", "msala7": "weapon","msalla7": "weapon",
       "knife": "weapon", "sekkin": "weapon",
 "sekin": "weapon", "sekinak": "weapon", "sekkinak": "weapon", "baroud": "weapon",
@@ -264,13 +252,15 @@ slang_map = {
 }
 
 
+# Using fuzzy matching to account for typos and variations in slang terms
+
 def fuzzy_match(token: str, options: list, threshold=85):
     for opt in options:
         if fuzz.ratio(token, opt) >= threshold:
             return opt
     return None
 
-
+# Normalize slang variants using regex and fuzzy matching
 def normalize_variants(token):
     if re.match(r"sle7\w*", token):
         return "weapon"
@@ -290,6 +280,7 @@ def normalize_variants(token):
     return slang_map.get(token, token)
 
 
+#POS is used for Part Of Speech tagging that means identifying whether a word is a noun, verb, adjective, or adverb.
 def get_wordnet_pos(tag):
     if tag.startswith('J'): return wordnet.ADJ
     if tag.startswith('V'): return wordnet.VERB
@@ -297,37 +288,37 @@ def get_wordnet_pos(tag):
     if tag.startswith('R'): return wordnet.ADV
     return wordnet.NOUN
 
-
+# We re clean the text by applying several preprocessing steps such as lowercasing, removing punctuation, tokenization, stop word removal, slang normalization, POS tagging, and lemmatization. and
 def clean_text(text):
     logger.info("\n================ CLEANING PIPELINE ================")
     logger.info(f"RAW INPUT: {text}")
 
-    # 1) lower + punctuation
+    
     lowered = str(text).lower()
     cleaned_punc = re.sub(r"[^\w\s]", " ", lowered)
     logger.info(f"LOWERCASE & NO PUNCT: {cleaned_punc}")
 
-    # 2) tokenize
+   
     tokens = word_tokenize(cleaned_punc)
     logger.info(f"TOKENS: {tokens}")
 
-    # 3) remove stopwords
+    
     tokens_no_stop = [t for t in tokens if t not in stop_words]
     logger.info(f"AFTER STOPWORD REMOVAL: {tokens_no_stop}")
 
-    # 4) slang normalization
+    
     normalized = [normalize_variants(t) for t in tokens_no_stop]
     logger.info(f"AFTER SLANG NORMALIZATION: {normalized}")
 
-    # 5) POS tagging
+    
     tagged = nltk.pos_tag(normalized)
     logger.info(f"POS TAGS: {tagged}")
 
-    # 6) lemmatization
+    
     lemmatized = [lemmatizer.lemmatize(w, get_wordnet_pos(t)) for w, t in tagged]
     logger.info(f"LEMMATIZED TOKENS: {lemmatized}")
 
-    # 7) final string
+    
     final_cleaned = " ".join(lemmatized)
     logger.info(f"FINAL CLEANED TEXT: {final_cleaned}")
     logger.info("====================================================\n")
@@ -339,7 +330,10 @@ def clean_text(text):
 
 
 
-# ================== API ENDPOINT ==================
+
+
+# We define the main API endpoint /analyze that accepts POST requests with text data to analyze and classify it using both rule-based and model-based approaches.
+
 @app.post("/analyze")
 def analyze_text(data: dict):
     text = data.get("text", "")
@@ -347,35 +341,26 @@ def analyze_text(data: dict):
     if not text.strip():
         return {"label": "NORMAL", "confidence": 0.0}
 
-    # ==========================================================
-    # 1) ALWAYS CLEAN FIRST
-    # ==========================================================
+    
     cleaned = clean_text(text)
 
-    # ==========================================================
-    # 2) MODEL PREDICTION
-    # ==========================================================
+    
     probs = model.predict_proba([cleaned])[0]
     model_idx = probs.argmax()
     model_label = class_names[model_idx]
     model_conf = float(probs[model_idx])
 
-    # ==========================================================
-    # 3) RULE-BASED CLASSIFICATION (RAW AND CLEANED)
-    # ==========================================================
+    
     rule_label_raw = phrase_rules(text)
     rule_label_cleaned = phrase_rules(cleaned)
 
-    # Pick strongest rule result
+    
     rule_label = rule_label_raw or rule_label_cleaned
 
-        # ==========================================================
-    # 4) MERGE RULE + MODEL WITH 60% SUSPICIOUS THRESHOLD
-    # ==========================================================
+    
+    THRESHOLD = 0.60   
 
-    THRESHOLD = 0.60   # ← only suspicious if model ≥ 60%
-
-    # --- 4.1 WEAPONS ALWAYS OVERRIDE ---
+    
     if rule_label == "WEAPONS SLANG":
         return {
             "original": text,
@@ -385,7 +370,7 @@ def analyze_text(data: dict):
             "source": "RULE_STRONG"
         }
 
-    # --- 4.2 If RULE detects slang → TRUST RULE ---
+    
     if rule_label and rule_label != "NORMAL":
         return {
             "original": text,
@@ -395,7 +380,7 @@ def analyze_text(data: dict):
             "source": "RULE_OVERRIDE"
         }
 
-    # --- 4.3 MODEL detects slang BUT BELOW THRESHOLD → NORMAL ---
+    
     if model_label != "NORMAL" and model_conf < THRESHOLD:
         return {
             "original": text,
@@ -405,7 +390,7 @@ def analyze_text(data: dict):
             "source": "MODEL_BELOW_THRESHOLD"
         }
 
-    # --- 4.4 MODEL detects slang AND ABOVE THRESHOLD → use it ---
+    
     if model_label != "NORMAL" and model_conf >= THRESHOLD:
         return {
             "original": text,
@@ -415,7 +400,7 @@ def analyze_text(data: dict):
             "source": "MODEL_STRONG"
         }
 
-    # --- 4.5 NOTHING SUSPICIOUS (rules NORMAL + model NORMAL) ---
+    
     return {
         "original": text,
         "cleaned": cleaned,
