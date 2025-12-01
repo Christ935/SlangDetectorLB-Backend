@@ -7,9 +7,11 @@ from nltk.corpus import stopwords, wordnet
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 from fuzzywuzzy import fuzz
+import logging
 
 # ================== FASTAPI INIT ==================
 app = FastAPI()
+logger = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,9 +33,11 @@ nltk.download("wordnet")
 
 english_stop = set(stopwords.words("english"))
 leb_stopwords = {
-    "ya", "wallah", "shu", "shou", "enta", "ana", "huwe", "fi", "ma",
-    "ya3ne", "tab", "yalla", "lek", "ya3ni"
+    "ya","wallah","shu","shou","enta","ana","huwe","fi","ma",
+    "ya3ne","tab","yalla","lek","ya3ni","w","eh","ahu","akid",
+    "fiya","elha","hala2","hayda","hayde","haydi","hot"
 }
+
 stop_words = english_stop.union(leb_stopwords)
 
 lemmatizer = WordNetLemmatizer()
@@ -131,8 +135,36 @@ def phrase_rules(text: str):
         if obj in clean_t and ("bayda" in clean_t or "abyad" in clean_t):
             return "NORMAL"
 
+        # =====================================================
+    # 4) COCAINE RULES (NEW FIX)
     # =====================================================
-    # 4) ARREST TERMS + WHITE → COCAINE
+
+    text_words = clean_t.split()
+
+    # --- 4.1 HIGH PRIORITY: "el abyad" / "el bayda" ---
+    if "el abyad" in clean_t or "el bayda" in clean_t:
+        return "COCAINE SLANG"
+
+    # --- 4.2 "abyad" ALWAYS = cocaine ---
+    if "abyad" in clean_t:
+        return "COCAINE SLANG"
+
+    # --- 4.3 BAYDA ALONE (SAFE UNLESS DRUG CONTEXT) ---
+    cocaine_context = [
+        "otaata", "packet", "poudra", "powder",
+        "l2met", "bag", "kabsna", "kamacho"
+    ]
+
+    if "bayda" in clean_t:
+        # if any cocaine context appears → cocaine slang
+        if any(c in clean_t for c in cocaine_context):
+            return "COCAINE SLANG"
+        # else → NORMAL (egg, shirt bayda, etc)
+        # will be returned by later logic
+        pass
+
+    # =====================================================
+    # 4.4 ARREST TERMS + white (still work)
     # =====================================================
 
     arrest_terms = [
@@ -142,49 +174,56 @@ def phrase_rules(text: str):
         "kebsne", "kabasna", "kebsouni", "kabsouni"
     ]
 
-    if any(a in clean_t for a in arrest_terms) and ("abyad" in clean_t or "bayda" in clean_t):
+    if any(a in clean_t for a in arrest_terms) and ("abyad" in clean_t or "el abyad" in clean_t):
         return "COCAINE SLANG"
 
     # =====================================================
-    # 5) FOOD CONTEXT → NORMAL
-    # =====================================================
-
-    food_verbs = ["ekoul", "akol", "akoul", "bekoul", "bikol",
-                  "tekol", "takol", "akalet", "akal", "akalt"]
-    food_nouns = ["bayda", "egg", "eggs", "baydetain"]
-
-    if any(v in clean_t for v in food_verbs) and any(n in clean_t for n in food_nouns):
-        return "NORMAL"
-
-    # =====================================================
-    # 6) HIGH PRIORITY COCAINE PACKET TERMS
+    # 4.5 COCAINE packet terms with bayda
     # =====================================================
 
     cocaine_packet_terms = [
-        "otaata el abyad", "otaata abyad", "otaata bayda",
-        "otet abyad", "otet bayda",
-        "packet abyad", "packet bayda",
-        "bag abyad", "bag bayda",
-        "l2met abyad", "l2met bayda"
+        "otaata bayda", "otet bayda",
+        "packet bayda", "bag bayda",
+        "l2met bayda", "poudra bayda"
     ]
 
     if any(term in clean_t for term in cocaine_packet_terms):
         return "COCAINE SLANG"
 
     # =====================================================
-    # 7) DIRECT REQUEST FOR COCAINE
+    # 4.6 DIRECT REQUEST FOR COCAINE
     # =====================================================
 
-    request_verbs = ["bade", "baddi", "bedde",
-                     "jib", "jeeb", "jible",
-                     "dabbir", "ndabbir"]
+    request_verbs = [
+        "bade", "baddi", "bedde",
+        "jebet", "jib", "jeeb", "jible",
+        "ma3ak", "3andak",
+        "dabbir", "ndabbir"
+    ]
 
-    if any(v in clean_t for v in request_verbs) and ("abyad" in clean_t or "bayda" in clean_t):
-        return "COCAINE SLANG"
+    if "abyad" in clean_t or "el abyad" in clean_t or "el bayda" in clean_t:
+        if any(v in clean_t for v in request_verbs):
+            return "COCAINE SLANG"
+
+    # if only "bayda" + request verb → still NORMAL unless cocaine context
+    if "bayda" in clean_t and any(v in clean_t for v in request_verbs):
+        if any(c in clean_t for c in cocaine_context):
+            return "COCAINE SLANG"
+        return "NORMAL"
+
 
     # =====================================================
     # 8) FALLBACK: WHITE WITHOUT DRUG → NORMAL
     # =====================================================
+    pills_keywords = ["xans", "xan", "xanax", "hboub", "habbe", "7abbe", "pills", "pill"]
+    pills_request_verbs = [
+        "jebet", "jib", "jeeb", "jible", "3andak", "ma3ak",
+        "bade", "baddi", "bedde",
+        "btejeeb", "btjeeb", "dabbir", "ndabbir", "dabbirlé"
+    ]
+
+    if any(pk in clean_t for pk in pills_keywords) and any(rv in clean_t for rv in pills_request_verbs):
+        return "PILLS SLANG"
 
     if "abyad" in clean_t or "bayda" in clean_t:
         return "NORMAL"
@@ -260,17 +299,44 @@ def get_wordnet_pos(tag):
 
 
 def clean_text(text):
-    text = str(text).lower()
-    text = re.sub(r"[^\w\s]", " ", text)
+    logger.info("\n================ CLEANING PIPELINE ================")
+    logger.info(f"RAW INPUT: {text}")
 
-    tokens = word_tokenize(text)
-    tokens = [t for t in tokens if t not in stop_words]
-    tokens = [normalize_variants(t) for t in tokens]
+    # 1) lower + punctuation
+    lowered = str(text).lower()
+    cleaned_punc = re.sub(r"[^\w\s]", " ", lowered)
+    logger.info(f"LOWERCASE & NO PUNCT: {cleaned_punc}")
 
-    tagged = nltk.pos_tag(tokens)
+    # 2) tokenize
+    tokens = word_tokenize(cleaned_punc)
+    logger.info(f"TOKENS: {tokens}")
+
+    # 3) remove stopwords
+    tokens_no_stop = [t for t in tokens if t not in stop_words]
+    logger.info(f"AFTER STOPWORD REMOVAL: {tokens_no_stop}")
+
+    # 4) slang normalization
+    normalized = [normalize_variants(t) for t in tokens_no_stop]
+    logger.info(f"AFTER SLANG NORMALIZATION: {normalized}")
+
+    # 5) POS tagging
+    tagged = nltk.pos_tag(normalized)
+    logger.info(f"POS TAGS: {tagged}")
+
+    # 6) lemmatization
     lemmatized = [lemmatizer.lemmatize(w, get_wordnet_pos(t)) for w, t in tagged]
+    logger.info(f"LEMMATIZED TOKENS: {lemmatized}")
 
-    return " ".join(lemmatized)
+    # 7) final string
+    final_cleaned = " ".join(lemmatized)
+    logger.info(f"FINAL CLEANED TEXT: {final_cleaned}")
+    logger.info("====================================================\n")
+
+    return final_cleaned
+
+
+
+
 
 
 # ================== API ENDPOINT ==================
@@ -281,23 +347,79 @@ def analyze_text(data: dict):
     if not text.strip():
         return {"label": "NORMAL", "confidence": 0.0}
 
-    # Phrase-level logic first
-    rule = phrase_rules(text)
-    if rule:
+    # ==========================================================
+    # 1) ALWAYS CLEAN FIRST
+    # ==========================================================
+    cleaned = clean_text(text)
+
+    # ==========================================================
+    # 2) MODEL PREDICTION
+    # ==========================================================
+    probs = model.predict_proba([cleaned])[0]
+    model_idx = probs.argmax()
+    model_label = class_names[model_idx]
+    model_conf = float(probs[model_idx])
+
+    # ==========================================================
+    # 3) RULE-BASED CLASSIFICATION (RAW AND CLEANED)
+    # ==========================================================
+    rule_label_raw = phrase_rules(text)
+    rule_label_cleaned = phrase_rules(cleaned)
+
+    # Pick strongest rule result
+    rule_label = rule_label_raw or rule_label_cleaned
+
+        # ==========================================================
+    # 4) MERGE RULE + MODEL WITH 60% SUSPICIOUS THRESHOLD
+    # ==========================================================
+
+    THRESHOLD = 0.60   # ← only suspicious if model ≥ 60%
+
+    # --- 4.1 WEAPONS ALWAYS OVERRIDE ---
+    if rule_label == "WEAPONS SLANG":
         return {
             "original": text,
-            "cleaned": text.lower(),
-            "label": rule,
-            "confidence": 1.0
+            "cleaned": cleaned,
+            "label": "WEAPONS SLANG",
+            "confidence": 1.0,
+            "source": "RULE_STRONG"
         }
 
-    cleaned = clean_text(text)
-    probs = model.predict_proba([cleaned])[0]
-    predicted_index = probs.argmax()
+    # --- 4.2 If RULE detects slang → TRUST RULE ---
+    if rule_label and rule_label != "NORMAL":
+        return {
+            "original": text,
+            "cleaned": cleaned,
+            "label": rule_label,
+            "confidence": 1.0,
+            "source": "RULE_OVERRIDE"
+        }
 
+    # --- 4.3 MODEL detects slang BUT BELOW THRESHOLD → NORMAL ---
+    if model_label != "NORMAL" and model_conf < THRESHOLD:
+        return {
+            "original": text,
+            "cleaned": cleaned,
+            "label": "NORMAL",
+            "confidence": model_conf,
+            "source": "MODEL_BELOW_THRESHOLD"
+        }
+
+    # --- 4.4 MODEL detects slang AND ABOVE THRESHOLD → use it ---
+    if model_label != "NORMAL" and model_conf >= THRESHOLD:
+        return {
+            "original": text,
+            "cleaned": cleaned,
+            "label": model_label,
+            "confidence": model_conf,
+            "source": "MODEL_STRONG"
+        }
+
+    # --- 4.5 NOTHING SUSPICIOUS (rules NORMAL + model NORMAL) ---
     return {
         "original": text,
         "cleaned": cleaned,
-        "label": class_names[predicted_index],
-        "confidence": float(probs[predicted_index])
+        "label": "NORMAL",
+        "confidence": model_conf,
+        "source": "CLEAN"
     }
